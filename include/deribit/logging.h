@@ -3,12 +3,15 @@
 
 #include <memory>
 #include <vector>
+#include <string>
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/basic_file_sink.h>
 
 namespace deribit {
+
+inline std::shared_ptr<spdlog::logger> logger; // global logger instance
 
 enum class LogLevel {
     DEBUG,
@@ -19,9 +22,15 @@ enum class LogLevel {
     CRITICAL
 };
 
-inline std::shared_ptr<spdlog::logger> logger;
-
-/* Map LogLevel -> spdlog::level */
+/**
+ * Translate the project's LogLevel enum to spdlog's level enum.
+ *
+ * The STRATEGY level is treated as informational but is intended for
+ * separate formatting or filtering when used by higher-level code.
+ *
+ * @param lvl The LogLevel value to convert.
+ * @return The corresponding spdlog level enum value.
+ */
 inline spdlog::level::level_enum to_spd(LogLevel lvl) {
     switch (lvl) {
         case LogLevel::DEBUG:    return spdlog::level::debug;
@@ -29,12 +38,20 @@ inline spdlog::level::level_enum to_spd(LogLevel lvl) {
         case LogLevel::WARNING:  return spdlog::level::warn;
         case LogLevel::ERROR:    return spdlog::level::err;
         case LogLevel::CRITICAL: return spdlog::level::critical;
-        case LogLevel::STRATEGY: return spdlog::level::info;   // Same as INFO, but formatted separately
+        case LogLevel::STRATEGY: return spdlog::level::info;   // STRATEGY maps to info but can be formatted separately
     }
     return spdlog::level::info;
 }
 
-/* Initialize logger */
+/**
+ * Initialize the global logger instance used by the library and tests.
+ *
+ * This creates a console sink with colored output and a file sink that
+ * appends to the provided filename. Both sinks share a common logger
+ * instance which is set as the spdlog default logger.
+ *
+ * @param filename Path to the log file to use. Defaults to deribit.log.
+ */
 inline void init_logging(const std::string& filename = "deribit.log") {
     std::vector<spdlog::sink_ptr> sinks;
 
@@ -51,7 +68,13 @@ inline void init_logging(const std::string& filename = "deribit.log") {
     spdlog::set_default_logger(logger);
 }
 
-/* Set log level at runtime */
+/**
+ * Adjust the logging level of the global logger at runtime.
+ *
+ * If the logger has not been initialized this function is a no-op.
+ *
+ * @param lvl The new log level to apply.
+ */
 inline void set_log_level(LogLevel lvl) {
     if (!logger) return;
     auto spd_lvl = to_spd(lvl);
@@ -59,13 +82,21 @@ inline void set_log_level(LogLevel lvl) {
     spdlog::set_level(spd_lvl);
 }
 
+/**
+ * Convenience macros that forward to the shared logger instance.
+ *
+ * These macros provide short, familiar names for the common logging
+ * operations used throughout the codebase. Strategy and timer logs are
+ * formatted via an informational message wrapper so they can be filtered
+ * or recognized easily in output.
+ */
 /* Macro helpers */
-#define LOG_DEBUG(msg)     deribit::logger->debug(msg)
-#define LOG_INFO(msg)      deribit::logger->info(msg)
-#define LOG_WARN(msg)      deribit::logger->warn(msg)
-#define LOG_ERROR(msg)     deribit::logger->error(msg)
-#define LOG_STRATEGY(msg)  deribit::logger->info("[STRATEGY] {}", msg)
-#define LOG_TIMER(msg)     deribit::logger->info("[TIMER] {}", msg)
+#define LOG_DEBUG(...)     deribit::logger->debug(__VA_ARGS__)
+#define LOG_INFO(...)      deribit::logger->info(__VA_ARGS__)
+#define LOG_WARN(...)      deribit::logger->warn(__VA_ARGS__)
+#define LOG_ERROR(...)     deribit::logger->error(__VA_ARGS__)
+#define LOG_STRATEGY(...)  deribit::logger->info("[STRATEGY] {}", fmt::format(__VA_ARGS__))
+#define LOG_TIMER(...)     deribit::logger->info("[TIMER] {}", fmt::format(__VA_ARGS__))
 
 #define SET_LOG_LEVEL(lvl) deribit::set_log_level(lvl)
 

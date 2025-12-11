@@ -6,109 +6,148 @@
 #include <boost/beast/ssl.hpp>
 #include <boost/asio/ssl.hpp>
 #include <boost/asio.hpp>
+#include <string>
 
 #include "logging.h"
 
 namespace deribit {
-	namespace beast		= boost::beast;
-	namespace websocket = beast::websocket;
-	namespace ssl		= boost::asio::ssl;
-	namespace net		= boost::asio;
+    namespace beast      = boost::beast;
+    namespace websocket  = beast::websocket;
+    namespace ssl        = boost::asio::ssl;
+    namespace net        = boost::asio;
 
-	// Deribit WS endpoint
-	static constexpr const char* DERIBIT_HOST = "www.deribit.com";
-	static constexpr const char* DERIBIT_PORT = "443";
-	static constexpr const char* DERIBIT_PATH = "/ws/api/v2";
+    /**
+     * Hostname and connection parameters for the Deribit test network.
+     *
+     * These constants are used by the WebSocket helper to form the
+     * TCP/TLS connection and perform the WebSocket handshake.
+     */
+    static constexpr const char* DERIBIT_HOST = "test.deribit.com";
+    static constexpr const char* DERIBIT_PORT = "443";
+    static constexpr const char* DERIBIT_PATH = "/ws/api/v2";
 
-	class WebSocketBeast {
-		net::io_context ioc_;
-		ssl::context ctx_;
-		net::ip::tcp::resolver resolver_;
-		websocket::stream<ssl::stream<net::ip::tcp::socket>> ws_;
+    /**
+     * Simple blocking WebSocket wrapper using Boost.Beast and OpenSSL.
+     *
+     * This helper manages an io_context, SSL context and a websocket
+     * stream. It provides synchronous connect, send, read and close
+     * helpers that the rest of the codebase can call from background
+     * threads. Error handling is performed by logging and by throwing
+     * exceptions when low-level failures occur during connect.
+     */
+    class WebSocketBeast {
+        net::io_context ioc_;
+        ssl::context ctx_;
+        net::ip::tcp::resolver resolver_;
+        websocket::stream<ssl::stream<net::ip::tcp::socket>> ws_;
 
-	public:
-		WebSocketBeast() :
-			ctx_(ssl::context::tlsv12_client),			// Use TLS v1.2
-			resolver_(net::make_strand(ioc_)),		// Resolver uses the same strand as the I/O context
-			ws_(net::make_strand(ioc_), ctx_) {		// WebSocket stream uses the same strand as the I/O context
+    public:
+        /**
+         * Construct the helper and configure basic TLS parameters.
+         *
+         * The SSL context is initialized for a TLS client and default
+         * verification paths are used. For testnet we disable certificate
+         * verification to simplify development; adjust this for production.
+         */
+        WebSocketBeast()
+            : ctx_(ssl::context::tlsv12_client),
+              resolver_(net::make_strand(ioc_)),
+              ws_(net::make_strand(ioc_), ctx_)
+        {
+            ctx_.set_default_verify_paths();
+            ctx_.set_verify_mode(ssl::verify_none); // OK for testnet
+        }
 
-			// TODO: Configure SSL context properly for production use!
-			ctx_.set_default_verify_paths();				// Load system default CA certificates
-			ctx_.set_verify_mode(ssl::verify_none);		// Disable certificate verification
-		};
+        /**
+         * Establish a TLS connection and perform the WebSocket handshake.
+         *
+         * This method resolves the host, connects the underlying TCP
+         * socket, performs a TLS handshake, and then completes the
+         * WebSocket opening handshake. It logs progress and throws on
+         * failures that occur while setting SNI or during the handshakes.
+         */
+        void connect() {
+            LOG_INFO("Starting Deribit WebSocket connection...");
 
-		void connect() {
-			LOG_INFO("Starting Deribit WebSocket connection...");
+            LOG_DEBUG("Resolving {}:{}", DERIBIT_HOST, DERIBIT_PORT);
+            auto const results = resolver_.resolve(DERIBIT_HOST, DERIBIT_PORT);
 
-			LOG_DEBUG("Resolving {}:{}" + std::string(DERIBIT_HOST) + std::string( DERIBIT_PORT));
-			auto const results = resolver_.resolve(DERIBIT_HOST, DERIBIT_PORT);
+            LOG_DEBUG("TCP connecting...");
+            auto ep = net::connect(ws_.next_layer().next_layer(), results);
 
-			LOG_DEBUG("TCP connecting...");
-			auto ep = net::connect(ws_.next_layer().next_layer(), results);
+            std::string host_port = std::string(DERIBIT_HOST) + ":" + std::to_string(ep.port());
 
-			const std::string host_port = std::string(DERIBIT_HOST) + ":" + std::to_string(ep.port());
+            LOG_DEBUG("Setting SNI to {}", DERIBIT_HOST);
+            if (!SSL_set_tlsext_host_name(ws_.next_layer().native_handle(), DERIBIT_HOST)) {
+                beast::error_code ec(static_cast<int>(::ERR_get_error()), net::error::get_ssl_category());
+                throw beast::system_error{ec, "Failed to set SNI"};
+            }
 
-			LOG_DEBUG("Setting SNI...");
-			if (!SSL_set_tlsext_host_name(ws_.next_layer().native_handle(), DERIBIT_HOST)) {
-				beast::error_code ec(static_cast<int>(::ERR_get_error()), net::error::get_ssl_category());
-				throw beast::system_error{ec, "Failed to set SNI hostname"};
-			}
+            LOG_DEBUG("Starting TLS handshake...");
+            ws_.next_layer().handshake(ssl::stream_base::client);
 
-			LOG_DEBUG("Starting TLS handshake...");
-			ws_.next_layer().handshake(ssl::stream_base::client);
+            LOG_DEBUG("Performing WebSocket handshake...");
+            ws_.set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+            ws_.handshake(host_port, DERIBIT_PATH);
 
-			LOG_DEBUG("TLS handshake complete, starting WebSocket handshake...");
-			ws_.set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
+            LOG_INFO("Deribit WebSocket connected (Testnet).");
+        }
 
-			ws_.set_option(websocket::stream_base::decorator(
-				[](websocket::request_type& req)
-				{
-					req.set(beast::http::field::user_agent, "Deribit-HFT-Client");
-				}
-			));
+        /**
+         * Send a text message synchronously over the WebSocket.
+         *
+         * The function logs errors encountered during the write operation
+         * and returns without rethrowing to allow caller code to handle
+         * transient failures gracefully.
+         *
+         * @param msg The JSON text message to send.
+         */
+        void send(const std::string& msg) {
+            try {
+                ws_.write(net::buffer(msg));
+                LOG_DEBUG("WS Send: {}", msg);
+            } catch (const std::exception& e) {
+                LOG_ERROR("WS Send error: {}", e.what());
+            }
+        }
 
-			ws_.handshake(host_port, DERIBIT_PATH);
-			LOG_INFO("Deribit WebSocket connected.");
-		}
+        /**
+         * Read a text message synchronously from the WebSocket.
+         *
+         * Returns the received message as a std::string. On error an
+         * empty string is returned and the error is logged. This helper
+         * uses a Beast flat_buffer to collect the incoming payload.
+         *
+         * @return The received text message, or an empty string on error.
+         */
+        std::string read() {
+            try {
+                beast::flat_buffer buffer;
+                ws_.read(buffer);
+                std::string msg = beast::buffers_to_string(buffer.cdata());
+                LOG_DEBUG("WS Recv: {}", msg);
+                return msg;
+            } catch (const std::exception& e) {
+                LOG_ERROR("WS Read error: {}", e.what());
+                return "";
+            }
+        }
 
+        /**
+         * Close the WebSocket connection politely.
+         *
+         * This attempts a normal close handshake and logs any errors that
+         * occur during the operation.
+         */
+        void close() {
+            try {
+                ws_.close(websocket::close_code::normal);
+                LOG_INFO("WebSocket closed.");
+            } catch (const std::exception& e) {
+                LOG_ERROR("Close error: {}", e.what());
+            }
+        }
+    };
+}
 
-		void send(const std::string& msg)
-		{
-			try {
-				ws_.write(net::buffer(msg));
-				LOG_DEBUG("WS Send: {}" + msg);
-			}
-			catch (const std::exception& e) {
-				LOG_ERROR("WS Send error: {}" + std::string(e.what()));
-			}
-		}
-
-		std::string read()
-		{
-			try {
-				beast::flat_buffer buffer;
-				ws_.read(buffer);
-				std::string msg = beast::buffers_to_string(buffer.cdata());
-				LOG_DEBUG("WS Recv: {}" + msg);
-				return msg;
-			}
-			catch (const std::exception& e) {
-				LOG_ERROR("WS Read error: {}" + std::string(e.what()));
-				return "";
-			}
-		}
-
-		void close()
-		{
-			try {
-				ws_.close(websocket::close_code::normal);
-				LOG_INFO("WebSocket closed.");
-			}
-			catch (const std::exception& e) {
-				LOG_ERROR("Close error: {}" + std::string(e.what()));
-			}
-		}
-
-	};
-} // namespace deribit
-#endif //HFT_DERIBIT_WEBSOCKET_BEAST_H
+#endif // HFT_DERIBIT_WEBSOCKET_BEAST_H

@@ -15,6 +15,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # -----------------------------------------
 find_package(Boost REQUIRED COMPONENTS system)
 find_package(OpenSSL REQUIRED)
+find_package(simdjson REQUIRED)
 
 # -----------------------------------------
 # Common include directory
@@ -40,6 +41,7 @@ foreach(APP_FILE ${APP_SOURCES})
             Boost::system
             OpenSSL::SSL
             OpenSSL::Crypto
+            simdjson
     )
 
     # IDE include paths
