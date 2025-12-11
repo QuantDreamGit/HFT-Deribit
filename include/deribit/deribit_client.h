@@ -27,7 +27,7 @@ namespace deribit {
  * - Managing outbound and inbound queues for message dispatch.
  * - Using background threads for request sending and receiving messages.
  */
-class DeribitClient {
+class DeribitClient : public AccessTokenProvider {
 
 private:
     /* Authentication fields for OAuth2 client credentials flow. */
@@ -64,7 +64,7 @@ public:
      */
     DeribitClient()
         : receiver(ws, inbound_queue),
-          sender(outbound_queue, ws)
+          sender(outbound_queue, ws, this)
     {}
 
     /**
@@ -86,6 +86,14 @@ public:
     }
 
     /**
+     * @brief Get the access token.
+     * @return Reference to the access token string.
+     */
+    [[nodiscard]] const std::string& get_access_token() const {
+        return access_token;
+    }
+
+    /**
      * @brief Establish a connection to Deribit (testnet or mainnet depending on
      * the websocket helper configuration) and start the sender and
      * receiver background threads.
@@ -96,7 +104,57 @@ public:
 
         receiver.start();
         sender.start();
+
+        authenticate();
     }
+
+    void authenticate() {
+        if (client_id.empty() || client_secret.empty()) {
+            throw std::runtime_error("Credentials not loaded");
+        }
+
+        constexpr uint64_t AUTH_ID = 9001;
+
+        dispatcher.register_rpc(
+            AUTH_ID,
+
+            // on_success callback
+            [](const ParsedMessage& pm, void* user_ptr) {
+                auto* self = static_cast<DeribitClient*>(user_ptr);
+
+                // Parse: pm.result is raw JSON string
+                simdjson::ondemand::parser parser;
+                auto doc = parser.iterate(pm.result.data(), pm.result.size());
+
+                std::string_view token_sv;
+                if (doc["access_token"].get(token_sv) != simdjson::SUCCESS) {
+                    LOG_ERROR("Auth success received but no access_token found");
+                    return;
+                }
+
+                self->access_token = std::string(token_sv);
+                LOG_INFO("Authentication successful. Access token stored.");
+            },
+
+            // on_error callback
+            [](const ParsedMessage& pm, void*) {
+                LOG_ERROR("Authentication failed {} {}", pm.error_code, pm.error_msg);
+            },
+
+            this  // user pointer back to instance
+        );
+
+        // Build params for client_credentials flow
+        std::string params =
+            std::string(R"({"grant_type":"client_credentials","client_id":")")
+            + client_id +
+            R"(","client_secret":")" + client_secret + R"("})";
+
+        send_rpc(AUTH_ID, "public/auth", params);
+
+        LOG_INFO("Auth request sent");
+    }
+
 
     /**
      * @brief Register a subscription callback for a channel name.
@@ -187,6 +245,15 @@ public:
         sender.stop();
         ws.close();
     }
+
+    /**
+     * @brief Get a reference to the internal dispatcher.
+     * @return Reference to the Dispatcher instance.
+     */
+    Dispatcher& get_dispatcher() {
+        return dispatcher;
+    }
+
 };
 
 } // namespace deribit
