@@ -12,6 +12,15 @@
 
 namespace deribit {
 
+    /**
+     * Minimal interface for objects that can provide an access token.
+     * This avoids circular dependencies on DeribitClient.
+     */
+    struct AccessTokenProvider {
+        [[nodiscard]] virtual const std::string& get_access_token() const = 0;
+        virtual ~AccessTokenProvider() = default;
+    };
+
 /**
  * Background worker that takes outbound requests from a queue and sends
  * them over a websocket, subject to rate limiting.
@@ -36,16 +45,21 @@ class RequestSender {
     /** Atomic flag that controls whether the worker loop should keep running. */
     std::atomic<bool> running {false};
 
+    /** Pointer back to the owning DeribitClient (if needed). */
+    AccessTokenProvider* auth;
+
 public:
     /**
      * Construct a RequestSender bound to an outbound queue and websocket.
      *
      * @param q Reference to the queue that provides outbound messages.
      * @param ws_ref Reference to the websocket used for sending.
+     * @param auth_ptr Pointer to an AccessTokenProvider for private RPCs.
      */
     RequestSender(SPSCQueue<std::string, 1024>& q,
-                  WebSocketBeast& ws_ref)
-        : queue(q), ws(ws_ref) {}
+                  WebSocketBeast& ws_ref,
+                  AccessTokenProvider* auth_ptr)
+        : queue(q), ws(ws_ref), auth(auth_ptr) {}
 
     /**
      * Start the sender thread.
@@ -66,19 +80,32 @@ public:
 
             while (running.load()) {
 
-                // Rate limiter gate
                 while (!rl.allow_request()) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
 
-                // Pop outbound request
                 auto req = queue.pop();
-                if (!req.has_value()) {
-                    continue; // nothing to send yet
+                if (!req) continue;
+
+                std::string msg = std::move(*req);
+
+                // Only uses the interface, not DeribitClient
+                if (msg.find("\"private/") != std::string::npos) {
+
+                    const std::string& token = auth->get_access_token();
+
+                    if (!token.empty()) {
+                        size_t pos = msg.rfind('}');
+                        if (pos != std::string::npos) {
+                            msg.insert(pos,
+                                R"(,"access_token":")" + token + "\"");
+                        }
+                    } else {
+                        LOG_WARN("Attempted private RPC but access token is empty");
+                    }
                 }
 
-                // Send to websocket
-                ws.send(req.value());
+                ws.send(msg);
             }
         });
     }
