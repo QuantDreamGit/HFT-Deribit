@@ -17,20 +17,26 @@
 namespace deribit {
 
 /**
- * Small, opinionated client that wires together the websocket, queues,
- * background sender/receiver and the dispatcher. It provides simple
- * convenience methods to subscribe to channels and to send RPCs.
+ * @brief A small client that wires together the websocket, queues,
+ * background sender/receiver, and the dispatcher. It provides simple convenience
+ * methods to subscribe to channels and send RPCs.
+ *
+ * The client is responsible for:
+ * - Establishing a connection to Deribit (Testnet or Mainnet).
+ * - Handling WebSocket communication for subscriptions and RPC requests.
+ * - Managing outbound and inbound queues for message dispatch.
+ * - Using background threads for request sending and receiving messages.
  */
 class DeribitClient {
 
 private:
     /* Authentication fields for OAuth2 client credentials flow. */
-    std::string client_id;
-    std::string client_secret;
-    std::string access_token;
+    std::string client_id; /**< Client ID for authentication */
+    std::string client_secret; /**< Client secret for authentication */
+    std::string access_token; /**< Access token received after authentication */
 
-    WebSocketBeast ws;
-    Dispatcher dispatcher;
+    WebSocketBeast ws; /**< WebSocket connection handler */
+    Dispatcher dispatcher; /**< Dispatcher to handle incoming messages (RPC & subscription) */
 
     /** Inbound messages arriving from the websocket (single-consumer). */
     SPSCQueue<std::string, 4096> inbound_queue;
@@ -47,9 +53,12 @@ private:
     /** Connection state flag. */
     std::atomic<bool> connected{false};
 
+    /** Rate limiter for controlling the rate of requests sent. */
+    RateLimiter rate_limiter;
+
 public:
     /**
-     * Construct the client and wire the receiver and sender to the queues
+     * @brief Construct the client and wire the receiver and sender to the queues
      * and websocket. The client is initially disconnected; call connect()
      * to establish the underlying network connection and start workers.
      */
@@ -59,13 +68,13 @@ public:
     {}
 
     /**
-     * Callback type used for subscription notifications. The callback is
+     * @brief Callback type used for subscription notifications. The callback is
      * invoked with a ParsedMessage that contains channel and data views.
      */
     using SubCallback = void (*)(const ParsedMessage&);
 
     /**
-     * Load client credentials from environment variables.
+     * @brief Load client credentials from environment variables.
      *
      * This helper reads DERIBIT_CLIENT_ID and DERIBIT_CLIENT_SECRET
      * from the environment and stores them in the client instance.
@@ -77,7 +86,7 @@ public:
     }
 
     /**
-     * Establish a connection to Deribit (testnet or mainnet depending on
+     * @brief Establish a connection to Deribit (testnet or mainnet depending on
      * the websocket helper configuration) and start the sender and
      * receiver background threads.
      */
@@ -90,7 +99,7 @@ public:
     }
 
     /**
-     * Register a subscription callback for a channel name.
+     * @brief Register a subscription callback for a channel name.
      *
      * The provided callback will be invoked when a notification for the
      * hashed channel is dispatched. The channel string is used as-is and
@@ -104,7 +113,7 @@ public:
     }
 
     /**
-     * Convenience helper to subscribe to a single channel.
+     * @brief Convenience helper to subscribe to a single channel.
      *
      * This formats a public/subscribe RPC and queues it for sending by the
      * background RequestSender. The request id here is a fixed value for
@@ -113,6 +122,12 @@ public:
      * @param channel The subscription channel to subscribe to.
      */
     void subscribe(const std::string& channel) {
+        // Check rate limiter before sending request
+        if (!rate_limiter.allow_request()) {
+            LOG_WARN("Rate limit exceeded, request denied.");
+            return;
+        }
+
         std::string msg = std::string(R"({
             "jsonrpc": "2.0",
             "id": 1001,
@@ -126,7 +141,7 @@ public:
     }
 
     /**
-     * Send a generic RPC request. The message is formatted and queued for
+     * @brief Send a generic RPC request. The message is formatted and queued for
      * asynchronous transmission by the RequestSender.
      *
      * @param id Numeric request id used to correlate responses.
@@ -134,6 +149,12 @@ public:
      * @param params_json Preformatted JSON string for the params field.
      */
     void send_rpc(uint64_t id, const std::string& method, const std::string& params_json) {
+        // Check rate limiter before sending request
+        if (!rate_limiter.allow_request()) {
+            LOG_WARN("Rate limit exceeded, request denied.");
+            return;
+        }
+
         std::string msg =
             R"({"jsonrpc":"2.0","id":)" + std::to_string(id) +
             R"(,"method":")" + method + R"(","params":)" + params_json + "}";
@@ -142,7 +163,7 @@ public:
     }
 
     /**
-     * Poll once for inbound messages and dispatch them.
+     * @brief Poll once for inbound messages and dispatch them.
      *
      * This is a non-blocking poll that pops a single message from the
      * inbound queue if available and passes it to the dispatcher for
@@ -157,7 +178,7 @@ public:
     }
 
     /**
-     * Close the client by stopping background workers and closing the
+     * @brief Close the client by stopping background workers and closing the
      * underlying websocket connection.
      */
     void close() {
