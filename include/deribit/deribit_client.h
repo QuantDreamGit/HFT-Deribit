@@ -56,6 +56,9 @@ private:
     /** Rate limiter for controlling the rate of requests sent. */
     RateLimiter rate_limiter;
 
+    /** Dedicated dispatcher thread. */
+    std::thread dispatcher_thread;
+
 public:
     /**
      * @brief Construct the client and wire the receiver and sender to the queues
@@ -106,6 +109,8 @@ public:
         receiver.start();
         sender.start();
 
+        dispatcher_thread = std::thread(&DeribitClient::dispatch_loop, this);
+
         authenticate();
     }
 
@@ -123,17 +128,12 @@ public:
             [](const ParsedMessage& pm, void* user_ptr) {
                 auto* self = static_cast<DeribitClient*>(user_ptr);
 
-                // Parse: pm.result is raw JSON string
-                simdjson::ondemand::parser parser;
-                auto doc = parser.iterate(pm.result.data(), pm.result.size());
-
-                std::string_view token_sv;
-                if (doc["access_token"].get(token_sv) != simdjson::SUCCESS) {
+                if (pm.access_token.empty()) {
                     LOG_ERROR("Auth success received but no access_token found");
                     return;
                 }
 
-                self->access_token = std::string(token_sv);
+                self->access_token = pm.access_token;
                 LOG_INFO("Authentication successful. Access token stored.");
             },
 
@@ -222,30 +222,47 @@ public:
     }
 
     /**
-     * @brief Poll once for inbound messages and dispatch them.
+     * @brief Continuous dispatch loop that runs until the client is closed.
      *
-     * This is a non-blocking poll that pops a single message from the
-     * inbound queue if available and passes it to the dispatcher for
-     * routing to RPC or subscription handlers. Call frequently or run
-     * in a dedicated thread for continuous processing.
+     * This function repeatedly waits for messages on the inbound queue
+     * and dispatches them. It can be run in a dedicated thread for
+     * continuous processing.
      */
-    void poll() {
-        auto m = inbound_queue.pop();
-        if (!m.has_value()) return;
+    void dispatch_loop() {
+        while (true) {
+            auto msg = inbound_queue.wait_and_pop();
 
-        dispatcher.dispatch(m->c_str(), m->size());
+            // Shutdown signal
+            if (!connected.load(std::memory_order_acquire) || msg.empty()) {
+                break;
+            }
+
+            simdjson::padded_string padded(msg);
+            dispatcher.dispatch(padded);
+        }
+
+        LOG_INFO("Dispatcher thread exiting");
     }
+
 
     /**
      * @brief Close the client by stopping background workers and closing the
      * underlying websocket connection.
      */
     void close() {
-        connected = false;
-        receiver.stop();
-        sender.stop();
-        ws.close();
+        connected.store(false, std::memory_order_release);
+
+    inbound_queue.push("");      // unblock dispatcher
+
+        receiver.request_stop();     // signal receiver
+        sender.stop();               // sender can stop immediately
+        receiver.stop();             // now join safely
+
+        if (dispatcher_thread.joinable()) {
+            dispatcher_thread.join();
+        }
     }
+
 
     /**
      * @brief Get a reference to the internal dispatcher.

@@ -1,27 +1,27 @@
 #include <iostream>
-#include <string>
-#include <atomic>
+#include <mutex>
+#include <condition_variable>
 
 #include "deribit/logging.h"
-#include "deribit/websocket_beast.h"
-#include "deribit/dispatcher.h"
-#include "deribit/request_sender.h"
-#include "deribit/spsc_queue.h"
-#include "deribit/receiver.h"
+#include "deribit/deribit_client.h"
 
 /**
  * Integration test that connects to Deribit's Testnet, subscribes to a
  * price index channel and exits once a subscription notification is
- * received. This program exercises the WebSocket, receiver, sender and
- * dispatcher plumbing in a small end-to-end scenario.
+ * received. This program exercises the DeribitClient subscription
+ * plumbing in a small end-to-end scenario.
  */
 
 /**
- * Global flag used by the test to indicate a subscription notification
- * has been received. The flag is atomic because it is set from the
- * dispatcher callback which may run on a different thread.
+ * Synchronization primitives used to block the main thread until the
+ * first subscription tick is received.
+ *
+ * The callback is invoked from the client's dispatcher thread, while
+ * the main thread waits on the condition variable.
  */
-std::atomic<bool> subscription_triggered = false;
+std::mutex sub_mtx;
+std::condition_variable sub_cv;
+bool subscription_triggered = false;
 
 /**
  * Subscription callback invoked when a subscription notification for
@@ -32,77 +32,60 @@ std::atomic<bool> subscription_triggered = false;
  */
 void on_price(const deribit::ParsedMessage& pm)
 {
-    subscription_triggered = true;
+	LOG_INFO("Subscription received");
+	LOG_INFO("Channel = {}", pm.channel);
+	LOG_INFO("Data    = {}", pm.data);
 
-    LOG_INFO("Subscription received");
-    LOG_INFO("Channel = {}", pm.channel);
-    LOG_INFO("Data    = {}", pm.data);
+	{
+		std::lock_guard<std::mutex> lock(sub_mtx);
+		subscription_triggered = true;
+	}
+	sub_cv.notify_one();
 }
 
 /**
  * Main test entry point.
  *
- * The program initializes logging, connects the WebSocket, registers a
- * subscription handler with the dispatcher, starts the sender and
- * receiver background threads, issues a public/subscribe request and
- * then enters a dispatch loop until the subscription callback fires.
+ * The program initializes logging, constructs the DeribitClient,
+ * registers a subscription handler, connects to Deribit, issues a
+ * public/subscribe request and blocks until the first notification
+ * is received.
+ *
+ * @return Exit code (0 on success).
  */
-int main() {
-    // Setup logging
-    deribit::init_logging();
-    SET_LOG_LEVEL(deribit::LogLevel::DEBUG);
+int main()
+{
+	// Setup logging
+	deribit::init_logging();
+	SET_LOG_LEVEL(deribit::LogLevel::DEBUG);
 
-    LOG_INFO("Connecting to Deribit Testnet");
+	LOG_INFO("Connecting to Deribit Testnet");
 
-    // Initialize WebSocket, Dispatcher, Sender, Receiver
-    deribit::WebSocketBeast ws;
-    deribit::Dispatcher dispatcher;
+	deribit::DeribitClient client;
 
-    // Outbound queue for WS sending
-    deribit::SPSCQueue<std::string, 1024> outbound_queue;
-    deribit::RequestSender sender(outbound_queue, ws);
-    // Inbound queue for WS receiving
-    deribit::SPSCQueue<std::string, 4096> inbound_queue;
-    deribit::Receiver receiver(ws, inbound_queue);
+	// Register subscription handler
+	client.register_subscription(
+		"deribit_price_index.btc_usd",
+		on_price
+	);
 
-    // Register subscription handler
-    dispatcher.register_subscription("deribit_price_index.btc_usd", on_price);
+	// Connect client (starts WS, sender, receiver, dispatcher)
+	client.connect();
 
-    // Connect WebSocket
-    ws.connect();
-    // Start sender and receiver threads
-    sender.start();
-    receiver.start();
+	LOG_INFO("Connected. Sending subscription request");
 
-    LOG_INFO("Connected. Sending subscription request");
+	// Issue subscription request
+	client.subscribe("deribit_price_index.btc_usd");
 
-    // Send subscription request
-    outbound_queue.push(
-        R"({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "public/subscribe",
-            "params": { "channels": ["deribit_price_index.btc_usd"] }
-        })"
-    );
+	// Block until subscription callback fires
+	{
+		std::unique_lock<std::mutex> lock(sub_mtx);
+		sub_cv.wait(lock, [] { return subscription_triggered; });
+	}
 
-    // Main dispatch loop
-    while (!subscription_triggered.load()) {
+	LOG_INFO("Real Deribit subscription test passed");
 
-        auto msg = inbound_queue.pop();
-        if (!msg.has_value()) {
-            continue;
-        }
+	client.close();
 
-        LOG_DEBUG("Raw Received: {}", msg.value());
-        dispatcher.dispatch(msg->c_str(), msg->size());
-    }
-
-    LOG_INFO("Real Deribit subscription test passed");
-
-    receiver.stop();
-    sender.stop();
-    ws.close();
-
-    return 0;
+	return 0;
 }

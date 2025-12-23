@@ -14,7 +14,7 @@ namespace deribit {
  */
 struct ParsedMessage {
     /** Access token string when present. */
-    std::string_view access_token;
+    std::string access_token;
 
     /** Whether this message represents a response to a previously sent RPC. */
     bool is_rpc = false;

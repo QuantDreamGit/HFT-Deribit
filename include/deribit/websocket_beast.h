@@ -40,6 +40,7 @@ namespace deribit {
         ssl::context ctx_;
         net::ip::tcp::resolver resolver_;
         websocket::stream<ssl::stream<net::ip::tcp::socket>> ws_;
+        std::atomic<bool> shutting_down_{false};
 
     public:
         /**
@@ -127,10 +128,26 @@ namespace deribit {
                 std::string msg = beast::buffers_to_string(buffer.cdata());
                 LOG_DEBUG("WS Recv: {}", msg);
                 return msg;
-            } catch (const std::exception& e) {
-                LOG_ERROR("WS Read error: {}", e.what());
+            }
+            catch (const std::exception& e) {
+                if (shutting_down_.load(std::memory_order_acquire)) {
+                    LOG_DEBUG("WS read terminated during shutdown: {}", e.what());
+                } else {
+                    LOG_ERROR("WS Read error: {}", e.what());
+                }
                 return "";
             }
+        }
+
+
+        /**
+         * Mark the WebSocket as shutting down.
+         *
+         * This sets an atomic flag that can be checked by other
+         * components to determine whether shutdown is in progress.
+         */
+        void mark_shutting_down() {
+            shutting_down_.store(true, std::memory_order_release);
         }
 
         /**
@@ -140,11 +157,15 @@ namespace deribit {
          * occur during the operation.
          */
         void close() {
+            shutting_down_.store(true, std::memory_order_release);
+
             try {
                 ws_.close(websocket::close_code::normal);
                 LOG_INFO("WebSocket closed.");
-            } catch (const std::exception& e) {
-                LOG_ERROR("Close error: {}", e.what());
+            }
+            catch (const std::exception& e) {
+                // Expected during shutdown
+                LOG_DEBUG("WebSocket close during shutdown: {}", e.what());
             }
         }
     };

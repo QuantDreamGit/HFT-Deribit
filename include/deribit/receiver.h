@@ -49,7 +49,7 @@ public:
      * receive loop in a separate thread.
      */
     void start() {
-        running = true;
+        running.store(true, std::memory_order_release);
         LOG_INFO("Receiver thread starting");
         th = std::thread([this]() { run(); });
     }
@@ -61,9 +61,17 @@ public:
      * joinable, and logs the stop event.
      */
     void stop() {
-        running = false;
-        if (th.joinable()) th.join();
-        LOG_INFO("Receiver thread stopped");
+        running.store(false, std::memory_order_release);
+
+        ws.close();
+
+        if (th.joinable())
+            th.join();
+    }
+
+    /** Request the receiver to stop running. */
+    void request_stop() {
+        running.store(false, std::memory_order_release);
     }
 
 private:
@@ -75,21 +83,15 @@ private:
      * queue. If the queue is full the message is dropped and a warning
      * is emitted.
      */
-    void run() {
-        while (running.load()) {
-
+    void run() const {
+        while (running.load(std::memory_order_acquire)) {
             std::string msg = ws.read();
+            if (msg.empty()) break;
 
-            if (msg.empty()) {
-                LOG_DEBUG("Receiver: empty message received");
-                continue;
-            }
-
-            // Attempt queue push
-            if (!queue.push(msg)) {
-                LOG_WARN("Inbound queue full: dropping message");
-            }
+            queue.push(std::move(msg));
         }
+
+        LOG_DEBUG("Receiver thread exiting");
     }
 };
 

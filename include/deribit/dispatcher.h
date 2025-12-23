@@ -101,68 +101,88 @@ public:
      * This function performs zero-copy extraction where possible and will
      * return early on malformed messages.
      *
-     * @param buf Pointer to the JSON message buffer.
-     * @param len Length of the buffer in bytes.
+     * @param json Padded JSON message buffer.
      */
-    inline void dispatch(const char* buf, size_t len) {
-        auto doc = parser.iterate(buf, len);
+    inline void dispatch(simdjson::padded_string_view json) {
+        auto doc_res = parser.iterate(json);
+        if (doc_res.error() != simdjson::SUCCESS)
+            return;
+
+        simdjson::ondemand::document doc = std::move(doc_res.value());
 
         ParsedMessage pm;
 
-        // Detect RPC responses by presence of an "id" field.
-        if (auto id = doc["id"].get_uint64(); !id.error()) {
+        /* ------------------------------------------------------------
+         * Detect RPC responses by presence of an "id" field
+         * ------------------------------------------------------------ */
+        if (auto id = doc["id"].get_uint64(); id.error() == simdjson::SUCCESS) {
             pm.is_rpc = true;
             pm.id     = id.value();
         }
 
-        // Detect subscription notifications when message has no id and
-        // the method field equals "subscription".
+        /* ------------------------------------------------------------
+         * Detect subscription notifications (method == "subscription")
+         * ------------------------------------------------------------ */
         if (!pm.is_rpc) {
             std::string_view method_sv;
-            if (doc["method"].get(method_sv) == simdjson::SUCCESS) {
-                if (method_sv == "subscription") {
-                    pm.is_subscription = true;
-                }
+            if (doc["method"].get(method_sv) == simdjson::SUCCESS &&
+                method_sv == "subscription") {
+                pm.is_subscription = true;
             }
         }
 
-        // Consume optional latency fields if present. Values are ignored
-        // here but reading them prevents leaving pending iterators.
-        doc["usIn"].get_uint64();
-        doc["usOut"].get_uint64();
-        doc["usDiff"].get_uint64();
-
-        // Handle RPC response: either call on_error or on_success.
+        /* ------------------------------------------------------------
+         * Consume optional latency fields (RPC responses only)
+         * ------------------------------------------------------------ */
+        if (pm.is_rpc) {
+            uint64_t tmp;
+            doc["usIn"].get(tmp);
+            doc["usOut"].get(tmp);
+            doc["usDiff"].get(tmp);
+        }
+        /* ------------------------------------------------------------
+         * Handle RPC response
+         * ------------------------------------------------------------ */
         if (pm.is_rpc) {
             RPCHandler& h = rpc_handler[pm.id & (MAX_INFLIGHT - 1)];
 
-            auto err_field = doc["error"];
-            if (!err_field.is_null()) {
+            auto err = doc["error"];
+            if (err.error() == simdjson::SUCCESS && !err.is_null()) {
                 pm.is_error = true;
 
                 int64_t code = 0;
-                err_field["code"].get(code);
+                err["code"].get(code);
                 pm.error_code = code;
 
                 std::string_view msg_sv;
-                err_field["message"].get(msg_sv);
+                err["message"].get(msg_sv);
                 pm.error_msg = msg_sv;
 
                 if (h.on_error)
                     h.on_error(pm, h.user_data);
 
             } else {
-                pm.result = doc["result"].raw_json();
+                /* Extract result as raw JSON (zero-copy) */
+                auto raw = doc["result"].raw_json();
+                if (raw.error() == simdjson::SUCCESS)
+                    pm.result = raw.value();
+
+                // Optional: extract access_token if present (used by public/auth)
+                auto res_obj = doc["result"].get_object();
+                if (res_obj.error() == simdjson::SUCCESS) {
+                    auto tok = res_obj.value()["access_token"].get_string();
+                    if (tok.error() == simdjson::SUCCESS) {
+                        pm.access_token.assign(tok.value());
+                    }
+                }
 
                 if (h.on_success)
                     h.on_success(pm, h.user_data);
             }
         }
 
-        // Handle subscription notification: extract params, channel and
-        // data, then look up the channel handler and call it if present.
+        // Handle subscription notification
         if (pm.is_subscription) {
-
             auto params_res = doc["params"].get_object();
             if (params_res.error() != simdjson::SUCCESS)
                 return;
@@ -182,7 +202,6 @@ public:
             pm.data = data_res.value();
 
             const uint32_t idx = fast_hash(pm.channel) & (SUB_TABLE - 1);
-
             if (const auto handler = sub_handler[idx])
                 handler(pm);
         }

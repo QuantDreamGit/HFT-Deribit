@@ -4,6 +4,8 @@
 #include <atomic>
 #include <cstddef>
 #include <optional>
+#include <condition_variable>
+#include <mutex>
 
 namespace deribit {
 	/**
@@ -35,6 +37,10 @@ namespace deribit {
 		/** Consumer index (next slot to read). */
 		alignas(64) std::atomic<size_t> tail{0};
 
+		/** Mutex for condition variable for blocking operations. */
+		std::mutex mtx_;
+		std::condition_variable cv_;
+
 	public:
 		/**
 		 * Attempt to push a value into the queue.
@@ -50,7 +56,7 @@ namespace deribit {
 		bool push(const T& v) {
 			size_t h = head.load(std::memory_order_relaxed);
 			// Compute next slot using power-of-two wrap
-			size_t next = (h + 1) & (N - 1);
+			const size_t next = (h + 1) & (N - 1);
 
 			// Check if the queue is full
 			if (next == tail.load(std::memory_order_acquire)) return false;
@@ -58,6 +64,10 @@ namespace deribit {
 			// Store the value and publish the new head index
 			buffer[h] = v;
 			head.store(next, std::memory_order_release);
+
+			// Wake consumer if it was sleeping
+			cv_.notify_one();
+
 			return true;
 		}
 
@@ -80,6 +90,43 @@ namespace deribit {
 			tail.store((t + 1) & (N - 1), std::memory_order_release);
 			return v;
 		}
+
+		/**
+		 * Pop a value from the queue, blocking if necessary until an element
+		 * is available.
+		 *
+		 * This function first attempts the non-blocking pop() method. If
+		 * that fails it acquires a lock and waits on a condition variable
+		 * until an element is available. It then performs a guaranteed
+		 * successful pop and returns the value.
+		 *
+		 * @return The popped element.
+		 */
+		T wait_and_pop() {
+			// First try fast path (no locks)
+			if (auto v = pop())
+				return std::move(*v);
+
+			// Slow path: block
+			std::unique_lock<std::mutex> lock(mtx_);
+			cv_.wait(lock, [&] {
+				return !empty();
+			});
+
+			// Guaranteed non-empty here
+			auto v = pop();
+			return std::move(*v);
+		}
+
+		/**
+		 * Check whether the queue is empty.
+		 *
+		 * @return true if the queue is empty, false otherwise.
+		 */
+		bool empty() const {
+			return head.load(std::memory_order_acquire) == tail.load(std::memory_order_acquire);
+		}
+
 	};
 }
 

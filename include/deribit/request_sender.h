@@ -119,6 +119,7 @@ public:
     void stop() {
         running = false;
         if (worker.joinable()) worker.join();
+        LOG_DEBUG("Sender stopped");
     }
 };
 
