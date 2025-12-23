@@ -61,9 +61,6 @@ int main() {
 
 	deribit::DeribitClient client;
 
-	LOG_INFO("Loading credentials...");
-	client.load_credentials_from_env();
-
 	LOG_INFO("Connecting...");
 	client.connect();
 

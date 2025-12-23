@@ -62,10 +62,11 @@ public:
      * and websocket. The client is initially disconnected; call connect()
      * to establish the underlying network connection and start workers.
      */
-    DeribitClient()
-        : receiver(ws, inbound_queue),
-          sender(outbound_queue, ws, this)
-    {}
+    DeribitClient() : receiver(ws, inbound_queue),
+                      sender(outbound_queue, ws, this) {
+        LOG_DEBUG("Loading credentials from env...");
+        load_credentials_from_env();
+    }
 
     /**
      * @brief Callback type used for subscription notifications. The callback is
