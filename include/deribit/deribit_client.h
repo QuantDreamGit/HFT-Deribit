@@ -2,9 +2,7 @@
 #define HFTDERIBIT_DERIBIT_CLIENT_H
 
 #include <string>
-#include <functional>
 #include <atomic>
-#include <unordered_map>
 
 #include "websocket_beast.h"
 #include "dispatcher.h"
@@ -58,6 +56,7 @@ private:
 
     /** Dedicated dispatcher thread. */
     std::thread dispatcher_thread;
+
 
 public:
     /**
@@ -206,19 +205,19 @@ public:
      * @param id Numeric request id used to correlate responses.
      * @param method The RPC method name (for example "public/ping").
      * @param params_json Preformatted JSON string for the params field.
+     * @return true if the request was queued successfully, false if rate limited.
      */
-    void send_rpc(uint64_t id, const std::string& method, const std::string& params_json) {
-        // Check rate limiter before sending request
+    bool send_rpc(const uint64_t id, const std::string& method, const std::string& params_json) {
         if (!rate_limiter.allow_request()) {
-            LOG_WARN("Rate limit exceeded, request denied.");
-            return;
+            LOG_WARN("Rate limit hit for ID {}", id);
+            return false;
         }
 
-        std::string msg =
-            R"({"jsonrpc":"2.0","id":)" + std::to_string(id) +
-            R"(,"method":")" + method + R"(","params":)" + params_json + "}";
+        const std::string msg = R"({"jsonrpc":"2.0","id":)" + std::to_string(id) +
+                          R"(,"method":")" + method + R"(","params":)" + params_json + "}";
 
         outbound_queue.push(msg);
+        return true;
     }
 
     /**
@@ -252,9 +251,13 @@ public:
     void close() {
         connected.store(false, std::memory_order_release);
 
-    inbound_queue.push("");      // unblock dispatcher
+        inbound_queue.push("");      // unblock dispatcher
 
         receiver.request_stop();     // signal receiver
+
+        // Wait a moment to let receiver exit cleanly
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
         sender.stop();               // sender can stop immediately
         receiver.stop();             // now join safely
 
@@ -271,7 +274,6 @@ public:
     Dispatcher& get_dispatcher() {
         return dispatcher;
     }
-
 };
 
 } // namespace deribit
