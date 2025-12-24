@@ -122,20 +122,27 @@ namespace deribit {
          * @return The received text message, or an empty string on error.
          */
         std::string read() {
+            // Check if the WebSocket is shutting down before attempting to read
+            if (shutting_down_.load(std::memory_order_acquire)) {
+                LOG_WARN("WebSocket is shutting down, aborting read.");
+                return "";  // Return empty string if shutting down
+            }
+
             try {
                 beast::flat_buffer buffer;
-                ws_.read(buffer);
-                std::string msg = beast::buffers_to_string(buffer.cdata());
-                LOG_DEBUG("WS Recv: {}", msg);
+                ws_.read(buffer);  // Read from the WebSocket
+                std::string msg = beast::buffers_to_string(buffer.cdata());  // Convert the buffer to string
+                LOG_DEBUG("WS Recv: {}", msg);  // Log the received message
                 return msg;
-            }
-            catch (const std::exception& e) {
+            } catch (const std::exception& e) {
                 if (shutting_down_.load(std::memory_order_acquire)) {
+                    // If the WebSocket is shutting down, log the termination but don't propagate the error
                     LOG_DEBUG("WS read terminated during shutdown: {}", e.what());
                 } else {
+                    // Log errors that occurred while reading
                     LOG_ERROR("WS Read error: {}", e.what());
                 }
-                return "";
+                return "";  // Return empty string in case of error
             }
         }
 
