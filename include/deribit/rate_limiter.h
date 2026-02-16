@@ -2,6 +2,7 @@
 #define HFT_DERIBIT_RATE_LIMITER_H
 #include <chrono>
 #include <algorithm>
+#include <mutex>
 
 namespace deribit {
 
@@ -25,6 +26,9 @@ class RateLimiter {
     /** Time point of the last refill operation used to compute elapsed time. */
     std::chrono::steady_clock::time_point last_refill;
 
+    /** Mutex to protect concurrent access to the token balance and last_refill. */
+    std::mutex mtx;
+
 public:
     /**
      * Construct a rate limiter starting full.
@@ -44,6 +48,8 @@ public:
      * @return true when the request is allowed, false when denied.
      */
     bool allow_request() {
+        // Lock the mutex to ensure thread-safe access to tokens and last_refill
+        std::lock_guard<std::mutex> lock(mtx);
         using namespace std::chrono;
 
         // Check and refill tokens based on elapsed time
