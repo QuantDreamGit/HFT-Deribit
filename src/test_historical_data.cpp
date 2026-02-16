@@ -1,7 +1,7 @@
-#include "deribit/deribit_client.h"
-#include "deribit/helpers.h"
-#include "deribit/historical_ohlcv.h"
-#include "deribit/logging.h"
+#include "../include/deribit/client/deribit_client.h"
+#include "../include/deribit/infra/helpers.h"
+#include "../include/deribit/models/historical_ohlcv.h"
+#include "../include/deribit/infra/logging.h"
 
 /**
  * @file main.cpp

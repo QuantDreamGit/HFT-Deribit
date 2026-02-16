@@ -4,13 +4,13 @@
 #include <string>
 #include <atomic>
 
-#include "websocket_beast.h"
+#include "../network/websocket_beast.h"
 #include "dispatcher.h"
-#include "env.h"
-#include "receiver.h"
-#include "request_sender.h"
-#include "spsc_queue.h"
-#include "rate_limiter.h"
+#include "../config/env.h"
+#include "../network/receiver.h"
+#include "../network/request_sender.h"
+#include "../infra/spsc_queue.h"
+#include "../infra/rate_limiter.h"
 
 namespace deribit {
 

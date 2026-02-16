@@ -4,9 +4,9 @@
 #include <thread>
 #include <atomic>
 
-#include "spsc_queue.h"
+#include "../infra/spsc_queue.h"
 #include "websocket_beast.h"
-#include "logging.h"
+#include "../infra/logging.h"
 
 namespace deribit {
 

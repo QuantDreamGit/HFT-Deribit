@@ -7,9 +7,9 @@
 
 #include <simdjson.h>
 
-#include "ohlcv.h"
+#include "../models/ohlcv.h"
 #include "parsed_message.h"
-#include "deribit_client.h"
+#include "../client/deribit_client.h"
 
 namespace deribit {
 

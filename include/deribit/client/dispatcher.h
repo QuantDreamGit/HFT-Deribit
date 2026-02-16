@@ -3,7 +3,7 @@
 
 #include <simdjson.h>
 
-#include "fast_hash.h"
+#include "../infra/fast_hash.h"
 #include "rpc_handler.h"
 
 namespace deribit {

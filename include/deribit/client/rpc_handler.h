@@ -1,6 +1,6 @@
 #ifndef HFTDERIBIT_RPC_HANDLER_H
 #define HFTDERIBIT_RPC_HANDLER_H
-#include "parsed_message.h"
+#include "../models/parsed_message.h"
 
 namespace deribit {
 

@@ -1,5 +1,5 @@
-#include "deribit/logging.h"
-#include "deribit/websocket_beast.h"
+#include "../include/deribit/infra/logging.h"
+#include "../include/deribit/network/websocket_beast.h"
 
 /**
  * Minimal example program that demonstrates basic setup and usage.

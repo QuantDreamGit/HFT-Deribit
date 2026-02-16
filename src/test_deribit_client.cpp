@@ -2,8 +2,8 @@
 #include <mutex>
 #include <condition_variable>
 
-#include "deribit/logging.h"
-#include "deribit/deribit_client.h"
+#include "../include/deribit/infra/logging.h"
+#include "../include/deribit/client/deribit_client.h"
 
 /**
  * Small test program that exercises the DeribitClient subscription path.

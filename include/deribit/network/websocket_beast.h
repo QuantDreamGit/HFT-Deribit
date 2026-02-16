@@ -8,7 +8,7 @@
 #include <boost/asio.hpp>
 #include <string>
 
-#include "logging.h"
+#include "../infra/logging.h"
 
 namespace deribit {
     namespace beast      = boost::beast;
