@@ -160,12 +160,15 @@ public:
 
                 if (h.on_error)
                     h.on_error(pm, h.user_data);
+                // Clear handler after invocation to prevent stale handlers for future requests with same id
+                h.clear();
 
             } else {
                 /* Extract result as raw JSON (zero-copy) */
                 auto raw = doc["result"].raw_json();
                 if (raw.error() == simdjson::SUCCESS)
-                    pm.result = raw.value();
+                    // pm.result = raw.value();
+                    pm.result.assign(raw.value());
 
                 // Optional: extract access_token if present (used by public/auth)
                 auto res_obj = doc["result"].get_object();
@@ -178,6 +181,8 @@ public:
 
                 if (h.on_success)
                     h.on_success(pm, h.user_data);
+                // Clear handler after invocation to prevent stale handlers for future requests with same id
+                h.clear();
             }
         }
 
