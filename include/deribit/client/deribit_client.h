@@ -4,6 +4,7 @@
 #include <string>
 #include <atomic>
 
+#include "account_manager.h"
 #include "../network/websocket_beast.h"
 #include "dispatcher.h"
 #include "../config/env.h"
@@ -34,6 +35,7 @@ private:
     std::string access_token; /**< Access token received after authentication */
 
     WebSocketBeast ws; /**< WebSocket connection handler */
+
     Dispatcher dispatcher; /**< Dispatcher to handle incoming messages (RPC & subscription) */
 
     /** Inbound messages arriving from the websocket (single-consumer). */
@@ -56,6 +58,9 @@ private:
 
     /** Dedicated dispatcher thread. */
     std::thread dispatcher_thread;
+
+    /** Account manager for handling account-related RPCs and state. */
+    deribit::AccountManager account_manager;
 
 
 public:
@@ -111,6 +116,9 @@ public:
         dispatcher_thread = std::thread(&DeribitClient::dispatch_loop, this);
 
         authenticate();
+
+        // Initialize account manager
+        account_manager.initialize(*this);
     }
 
     void authenticate() {
@@ -217,6 +225,18 @@ public:
                           R"(,"method":")" + method + R"(","params":)" + params_json + "}";
 
         outbound_queue.push(msg);
+        return true;
+    }
+
+    bool set_rpc_dispatch_handler(const uint64_t id,
+                              void (*on_success)(const ParsedMessage&, void*),
+                              void (*on_error)(const ParsedMessage&, void*),
+                              void* user_data) {
+        // Register the RPC handler for the given ID
+        // It will automatically be cleared after invocation to prevent stale
+        // handlers for future requests with the same ID
+        dispatcher.register_rpc(id, on_success, on_error, user_data);
+
         return true;
     }
 
