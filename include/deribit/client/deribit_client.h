@@ -3,6 +3,7 @@
 
 #include <string>
 #include <atomic>
+#include <future>
 
 #include "account_manager.h"
 #include "../network/websocket_beast.h"
@@ -59,11 +60,13 @@ private:
     /** Dedicated dispatcher thread. */
     std::thread dispatcher_thread;
 
+    /** Atomic counter for generating unique RPC request IDs. */
+    std::atomic<uint64_t> rpc_id_counter{1};
+
+public:
     /** Account manager for handling account-related RPCs and state. */
     deribit::AccountManager account_manager;
 
-
-public:
     /**
      * @brief Construct the client and wire the receiver and sender to the queues
      * and websocket. The client is initially disconnected; call connect()
@@ -119,6 +122,49 @@ public:
 
         // Initialize account manager
         account_manager.initialize(*this);
+    }
+
+    void connect_sync() {
+        ws.connect();
+        connected = true;
+
+        receiver.start();
+        sender.start();
+
+        dispatcher_thread = std::thread(&DeribitClient::dispatch_loop, this);
+
+        authenticate_sync();
+
+        // Initialize account manager
+        account_manager.initialize(*this);
+    }
+
+    void authenticate_sync() {
+        if (client_id.empty() || client_secret.empty()) {
+            LOG_ERROR("Credentials not loaded");
+            return;
+        }
+
+        std::string params =
+            std::string(R"({"grant_type":"client_credentials","client_id":")")
+            + client_id +
+            R"(","client_secret":")" + client_secret + R"("})";
+
+        ParsedMessage pm = send_rpc_sync("public/auth", params);
+
+        if (pm.is_error) {
+            LOG_ERROR("Authentication failed: ", pm.error_msg);
+            return;
+        }
+
+        if (pm.access_token.empty()) {
+            LOG_ERROR("Authentication succeeded but no access_token received");
+            return;
+        }
+
+        access_token = pm.access_token;
+
+        LOG_INFO("Authentication successful (sync).");
     }
 
     void authenticate() {
@@ -241,6 +287,101 @@ public:
     }
 
     /**
+     * @brief Send an RPC request and wait synchronously for the response.
+     *
+     * This helper sends an RPC request and blocks until a response is received
+     * or a timeout occurs. It uses a promise/future pair to wait for the
+     * response, and registers temporary RPC handlers that will set the promise
+     * value when the response arrives. The handlers are automatically cleared
+     * after invocation to prevent stale handlers for future requests with the
+     * same ID.
+     *
+     * @param method The RPC method name (e.g. "public/ping").
+     * @param params_json Preformatted JSON string for the params field.
+     * @param timeout Duration to wait for a response before throwing a timeout error.
+     * @return ParsedMessage containing either the result or error information.
+     * @throws std::runtime_error if the request is rate limited or if a timeout occurs.
+     */
+    ParsedMessage send_rpc_sync(
+        const std::string& method,
+        const std::string& params_json,
+        std::chrono::milliseconds timeout = std::chrono::seconds(5))
+    {
+        // Generate a unique ID for this RPC request
+        const uint64_t id = next_rpc_id();
+        // Create a promise and future to wait for the response
+        std::promise<ParsedMessage> promise;
+        auto future = promise.get_future();
+        // Register RPC handlers that will set the promise value on success or error
+        dispatcher.register_rpc(
+            id,
+            // on_success
+            [](const ParsedMessage& pm, void* user_ptr) {
+                auto* p = static_cast<std::promise<ParsedMessage>*>(user_ptr);
+                p->set_value(pm);
+            },
+            // on_error
+            [](const ParsedMessage& pm, void* user_ptr) {
+                auto* p = static_cast<std::promise<ParsedMessage>*>(user_ptr);
+                p->set_value(pm); // return error inside ParsedMessage
+            },
+            &promise
+        );
+
+        // Send the RPC request
+        if (!send_rpc(id, method, params_json)) {
+            throw std::runtime_error("Rate limited");
+        }
+        // Wait for the response with a timeout
+        if (future.wait_for(timeout) != std::future_status::ready) {
+            throw std::runtime_error("RPC timeout");
+        }
+        // Return the parsed message (either success or error)
+        return future.get();
+    }
+
+    /**
+     * @brief Send an RPC request and return a future for the response.
+     *
+     * This helper sends an RPC request and returns a std::future that will be
+     * set when the response arrives. It uses a shared_ptr to a promise to allow
+     * the RPC handlers to set the value when the response is received. The
+     * handlers are automatically cleared after invocation to prevent stale
+     * handlers for future requests with the same ID.
+     *
+     * @param method The RPC method name (e.g. "public/ping").
+     * @param params_json Preformatted JSON string for the params field.
+     * @return std::future<ParsedMessage> that will hold the response when it arrives.
+     */
+    std::future<ParsedMessage> send_rpc_async(
+    const std::string& method,
+    const std::string& params_json)
+    {
+        const uint64_t id = next_rpc_id();
+        // Use a shared_ptr to allow the RPC handlers to set the promise value
+        auto promise = std::make_shared<std::promise<ParsedMessage>>();
+        auto future  = promise->get_future();
+        // Register RPC handlers that will set the promise value on success or error
+        dispatcher.register_rpc(
+            id,
+            [](const ParsedMessage& pm, void* user_ptr) {
+                auto* p = static_cast<std::promise<ParsedMessage>*>(user_ptr);
+                p->set_value(pm);
+            },
+            [](const ParsedMessage& pm, void* user_ptr) {
+                auto* p = static_cast<std::promise<ParsedMessage>*>(user_ptr);
+                p->set_value(pm);
+            },
+            promise.get()
+        );
+
+        // Send the RPC request
+        send_rpc(id, method, params_json);
+        // Return the future to the caller so they can wait for the response asynchronously
+        return future;
+    }
+
+    /**
      * @brief Continuous dispatch loop that runs until the client is closed.
      *
      * This function repeatedly waits for messages on the inbound queue
@@ -293,6 +434,19 @@ public:
      */
     Dispatcher& get_dispatcher() {
         return dispatcher;
+    }
+
+    /**
+     * @brief Generate the next unique RPC request ID.
+     *
+     * This function atomically increments the internal counter and returns
+     * the new value. It uses relaxed memory ordering since the ID generation
+     * does not need to synchronize with other operations.
+     *
+     * @return A unique uint64_t ID for RPC requests.
+     */
+    uint64_t next_rpc_id() noexcept {
+        return rpc_id_counter.fetch_add(1, std::memory_order_relaxed);
     }
 };
 
