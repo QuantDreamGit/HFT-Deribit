@@ -4,7 +4,6 @@
 #include "../include/deribit/infra/logging.h"
 
 /**
- * @file main.cpp
  * @brief Utility program to fetch and persist historical OHLCV data from Deribit.
  * * This application demonstrates how to use the DeribitClient to retrieve large
  * datasets of historical candles, format them for console output, and persist
