@@ -1,6 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
 
-# Fix Boost policy for new CMake versions
 if (POLICY CMP0167)
     cmake_policy(SET CMP0167 OLD)
 endif()
@@ -18,35 +17,48 @@ find_package(OpenSSL REQUIRED)
 find_package(simdjson REQUIRED)
 
 # -----------------------------------------
-# Common include directory
+# Include directory
 # -----------------------------------------
 include_directories(${PROJECT_SOURCE_DIR}/include)
 
-# -----------------------------------------
-# Collect all .cpp files in src/
-# -----------------------------------------
-file(GLOB APP_SOURCES CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/src/*.cpp)
+# =========================================
+# CORE LIBRARY (src/)
+# =========================================
 
-# -----------------------------------------
-# Create one executable for each .cpp file
-# -----------------------------------------
-foreach(APP_FILE ${APP_SOURCES})
-    get_filename_component(APP_NAME ${APP_FILE} NAME_WE)
+file(GLOB_RECURSE CORE_SOURCES CONFIGURE_DEPENDS
+        ${PROJECT_SOURCE_DIR}/src/*.cpp
+)
 
-    add_executable(${APP_NAME} ${APP_FILE})
+add_library(deribit_core ${CORE_SOURCES})
 
-    # Link required libraries
-    target_link_libraries(${APP_NAME}
+target_link_libraries(deribit_core
+        PUBLIC
+        Boost::system
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        simdjson
+)
+
+target_include_directories(deribit_core
+        PUBLIC
+        ${PROJECT_SOURCE_DIR}/include
+)
+
+# =========================================
+# TEST EXECUTABLES (tests/)
+# =========================================
+
+file(GLOB TEST_SOURCES CONFIGURE_DEPENDS
+        ${PROJECT_SOURCE_DIR}/tests/*.cpp
+)
+
+foreach(TEST_FILE ${TEST_SOURCES})
+    get_filename_component(TEST_NAME ${TEST_FILE} NAME_WE)
+
+    add_executable(${TEST_NAME} ${TEST_FILE})
+
+    target_link_libraries(${TEST_NAME}
             PRIVATE
-            Boost::system
-            OpenSSL::SSL
-            OpenSSL::Crypto
-            simdjson
-    )
-
-    # IDE include paths
-    target_include_directories(${APP_NAME}
-            PRIVATE
-            ${PROJECT_SOURCE_DIR}/include
+            deribit_core
     )
 endforeach()
