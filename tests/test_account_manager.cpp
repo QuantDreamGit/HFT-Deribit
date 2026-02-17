@@ -11,10 +11,11 @@ int main() {
 	 * * Handles the underlying WebSocketBeast connection and RPC dispatching.
 	 */
 	deribit::DeribitClient client;
+	client.connect_sync();
 
-	LOG_INFO("Connecting to Deribit...");
-	client.connect();
+	const deribit::CurrencyAccountState ret = client.account_manager.get_currency_state("BTC");
 
+	std::cout << "Currency: " << ret.margin.balance << std::endl;
 
 	// Sleep for a moment to allow the RPC response to be processed
 	std::this_thread::sleep_for(std::chrono::seconds(30));
