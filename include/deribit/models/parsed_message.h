@@ -40,14 +40,16 @@ struct ParsedMessage {
     /** Round-trip timing difference in microseconds when available. */
     uint64_t usDiff = 0;
 
+    // TODO: Should I consider to switch to simple strings?
+
     /** Subscription channel name for notifications (zero-copy view). */
     std::string_view channel;
 
     /** Raw JSON payload for subscription notifications (zero-copy view). */
     std::string_view data;
 
-    /** Raw JSON result for RPC responses (zero-copy view). */
-    std::string_view result;
+    /** Raw JSON result for RPC responses. */
+    std::string result;
 
     /** Error message text when the message carries an error (zero-copy view). */
     std::string_view error_msg;
