@@ -5,12 +5,14 @@
 #include <string>
 #include <unordered_map>
 
+#include "deribit/models/currency_account_state.h"
+
 namespace deribit {
 
 	class DeribitClient;        // forward declaration
 	struct ParsedMessage;       // forward declaration
 
-	struct CurrencyAccountState {
+	struct AccountState {
 		double equity{};
 		double balance{};
 		double available_funds{};
@@ -30,11 +32,13 @@ namespace deribit {
 		void initialize(DeribitClient& client);
 		void initialize_from_snapshot(const std::string& json_snapshot);
 
-		CurrencyAccountState get_state(const std::string& currency) const;
+		AccountState get_state(const std::string& currency) const;
+		CurrencyAccountState get_currency_state(const std::string& currency) const;
 
 	private:
 		mutable std::mutex mtx_;
-		std::unordered_map<std::string, CurrencyAccountState> accounts_;
+		DeribitClient* client_{nullptr};
+		std::unordered_map<std::string, AccountState> accounts_;
 	};
 
 } // namespace deribit
