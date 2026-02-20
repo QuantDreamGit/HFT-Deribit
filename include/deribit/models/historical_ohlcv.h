@@ -66,6 +66,22 @@ namespace detail {
         }
         ctx->cv->notify_one();
     }
+
+    enum class TradeDirection : uint8_t {
+        Buy = 0,
+        Sell = 1
+    };
+
+    struct alignas(64) Trade {
+        int64_t  timestamp;     // ms since epoch
+        double   price;
+        double   amount;
+        uint64_t trade_seq;     // strictly increasing per instrument
+        TradeDirection direction;
+
+        // padding to keep 64-byte alignment stable
+        std::array<uint8_t, 7> _padding{};
+    };
 } // namespace detail
     /**
      * @brief Fetch exactly N OHLCV candles for a given instrument and resolution.
@@ -82,85 +98,179 @@ namespace detail {
      * @return A vector of OHLCV structures containing the fetched candle data.
      */
     inline std::vector<OHLCV> fetch_n_ohlcv(
-        DeribitClient& client,
-        const std::string& instrument,
-        const std::string& resolution,
-        const size_t n_candles
+    DeribitClient& client,
+    const std::string& instrument,
+    const std::string& resolution,
+    const size_t n_candles
     ) {
         constexpr size_t CHUNK_SIZE = 1000;
 
         std::vector<OHLCV> out;
-        out.reserve(n_candles + CHUNK_SIZE); // Extra headroom
-
-        std::mutex mtx;
-        std::condition_variable cv;
-        bool done = false;
-
-        detail::OHLCVContext ctx { &out, &mtx, &cv, &done };
+        out.reserve(n_candles + CHUNK_SIZE);
 
         const std::string res_val = (resolution == "1D") ? "1440" : resolution;
         const int64_t res_ms = std::stoll(res_val) * 60 * 1000;
 
-        int64_t current_end_ts = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
-
-        size_t last_size = 0;
+        int64_t current_end_ts =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
 
         while (out.size() < n_candles) {
-            constexpr uint64_t RPC_ID = 0xC0FFEE;
+
             size_t remaining = n_candles - out.size();
-            // Target exactly what is left, or the max chunk size
             const size_t batch_size = std::min(remaining, CHUNK_SIZE);
 
-            // We subtract (batch_size - 1) * res_ms because the window is inclusive.
-            // If we want 1000 candles, the window is 999 intervals wide.
-            const int64_t current_start_ts = current_end_ts - (static_cast<int64_t>(batch_size - 1) * res_ms);
-
-            {
-                std::lock_guard<std::mutex> lk(mtx);
-                done = false;
-            }
-
-            client.get_dispatcher().register_rpc(
-                RPC_ID, &detail::on_ohlcv_success, &detail::on_ohlcv_error, &ctx
-            );
+            const int64_t current_start_ts =
+                current_end_ts - (static_cast<int64_t>(batch_size - 1) * res_ms);
 
             std::string params =
-                R"({"instrument_name":")" + instrument + R"(",)"
-                R"("resolution":")" += resolution + R"(",)"
-                R"("start_timestamp":)" + std::to_string(current_start_ts) + R"(,)"
-                R"("end_timestamp":)" + std::to_string(current_end_ts) + "}";
+                std::string(R"({"instrument_name":")") + instrument +
+                R"(","resolution":")" + resolution +
+                R"(","start_timestamp":)" + std::to_string(current_start_ts) +
+                R"(,"end_timestamp":)" + std::to_string(current_end_ts) +
+                "}";
 
-            // If send_rpc returns false, it failed rate limits; we retry.
-            if (!client.send_rpc(RPC_ID, "public/get_tradingview_chart_data", params)) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                continue;
+            ParsedMessage pm;
+
+            try {
+                pm = client.send_rpc_sync(
+                    "public/get_tradingview_chart_data",
+                    params,
+                    std::chrono::seconds(5)
+                );
+            }
+            catch (const std::exception& e) {
+                LOG_ERROR("RPC failed: {}", e.what());
+                break;
             }
 
-            {
-                std::unique_lock<std::mutex> lk(mtx);
-                if (!cv.wait_for(lk, std::chrono::seconds(5), [&]{ return done; })) break;
+            if (pm.is_error) {
+                LOG_ERROR("OHLCV error: {} {}", pm.error_code, pm.error_msg);
+                break;
             }
 
-            if (out.size() == last_size) break;
-            last_size = out.size();
+            if (pm.result.empty()) {
+                LOG_WARN("Empty result received");
+                break;
+            }
 
-            // Move current_end_ts to 1ms BEFORE the current_start_ts to prevent duplicates
+            simdjson::dom::parser parser;
+            simdjson::padded_string padded(pm.result);
+
+            simdjson::dom::element doc = parser.parse(padded);
+
+            auto close  = doc["close"].get_array();
+            auto high   = doc["high"].get_array();
+            auto low    = doc["low"].get_array();
+            auto open   = doc["open"].get_array();
+            auto cost   = doc["cost"].get_array();
+            auto ticks  = doc["ticks"].get_array();
+            auto volume = doc["volume"].get_array();
+
+            const size_t count = ticks.size();
+
+            if (count == 0) {
+                break;
+            }
+
+            for (size_t i = 0; i < count; ++i) {
+                OHLCV candle{};
+                candle.ts_ms = static_cast<int64_t>(ticks.at(i));
+                candle.open  = static_cast<double>(open.at(i));
+                candle.high  = static_cast<double>(high.at(i));
+                candle.low   = static_cast<double>(low.at(i));
+                candle.close = static_cast<double>(close.at(i));
+                candle.volume= static_cast<double>(volume.at(i));
+                candle.cost  = static_cast<double>(cost.at(i));
+                out.emplace_back(candle);
+            }
+
             current_end_ts = current_start_ts - 1;
         }
 
-        // Sort chronologically
         std::ranges::sort(out, [](const OHLCV& a, const OHLCV& b) {
             return a.ts_ms < b.ts_ms;
         });
 
-        // Final trim to ensure we have exactly N (removing the oldest if we over-fetched)
         if (out.size() > n_candles) {
-            out.erase(out.begin(), out.begin() + static_cast<int64_t>(out.size() - n_candles));
+            out.erase(out.begin(),
+                      out.begin() + static_cast<int64_t>(out.size() - n_candles));
         }
 
         return out;
     }
+
+    inline std::vector<detail::Trade> fetch_last_n_trades(
+    DeribitClient& client,
+    const std::string& instrument,
+    size_t n_trades)
+    {
+        constexpr size_t CHUNK_SIZE = 1000;
+
+        std::vector<detail::Trade> out;
+        out.reserve(n_trades);
+
+        int64_t current_end_ts =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+
+        while (out.size() < n_trades) {
+
+            const size_t remaining = n_trades - out.size();
+            const size_t batch_size = std::min(remaining, CHUNK_SIZE);
+
+            std::string params =
+                std::string(R"({"instrument_name":")") + instrument +
+                R"(","end_timestamp":)" + std::to_string(current_end_ts) +
+                R"(,"count":)" + std::to_string(batch_size) +
+                R"(,"sorting":"desc"})";
+
+            ParsedMessage pm = client.send_rpc_sync(
+                "public/get_last_trades_by_instrument_and_time",
+                params
+            );
+
+            if (pm.is_error) {
+                LOG_ERROR(pm.error_msg);
+                return out;
+            }
+
+            simdjson::dom::parser parser;
+            simdjson::padded_string padded(pm.result);
+
+            simdjson::dom::element doc = parser.parse(padded);
+
+            auto trades = doc["trades"].get_array();
+
+            if (trades.size() == 0)
+                break;
+
+            for (auto trade : trades) {
+                detail::Trade t{};
+                t.timestamp = int64_t(trade["timestamp"]);
+                t.price     = double(trade["price"]);
+                t.amount    = double(trade["amount"]);
+                t.trade_seq = uint64_t(trade["trade_seq"]);
+
+                auto dir = static_cast<std::string>(trade["direction"]);
+                t.direction = (dir == "buy") ? detail::TradeDirection::Buy : detail::TradeDirection::Sell;
+
+                out.emplace_back(t);
+            }
+
+            // Move backward in time
+            current_end_ts =
+                int64_t(trades.at(trades.size()-1)["timestamp"]) - 1;
+        }
+
+        // We fetched in descending order — reverse to chronological
+        std::reverse(out.begin(), out.end());
+
+        return out;
+    }
+
+
+
 
 
 } // namespace deribit
