@@ -305,40 +305,56 @@ public:
     ParsedMessage send_rpc_sync(
         const std::string& method,
         const std::string& params_json,
-        std::chrono::milliseconds timeout = std::chrono::seconds(5))
+        std::chrono::milliseconds timeout = std::chrono::seconds(5),
+        int max_retries = 5)
     {
-        // Generate a unique ID for this RPC request
-        const uint64_t id = next_rpc_id();
-        // Create a promise and future to wait for the response
-        std::promise<ParsedMessage> promise;
-        auto future = promise.get_future();
-        // Register RPC handlers that will set the promise value on success or error
-        dispatcher.register_rpc(
-            id,
-            // on_success
-            [](const ParsedMessage& pm, void* user_ptr) {
-                auto* p = static_cast<std::promise<ParsedMessage>*>(user_ptr);
-                p->set_value(pm);
-            },
-            // on_error
-            [](const ParsedMessage& pm, void* user_ptr) {
-                auto* p = static_cast<std::promise<ParsedMessage>*>(user_ptr);
-                p->set_value(pm); // return error inside ParsedMessage
-            },
-            &promise
-        );
+        int attempt = 0;
+        std::chrono::milliseconds backoff{200};
 
-        // Send the RPC request
-        if (!send_rpc(id, method, params_json)) {
-            throw std::runtime_error("Rate limited");
+        while (attempt < max_retries) {
+            ++attempt;
+
+            const uint64_t id = next_rpc_id();
+
+            std::promise<ParsedMessage> promise;
+            auto future = promise.get_future();
+
+            dispatcher.register_rpc(
+                id,
+                [](const ParsedMessage& pm, void* user_ptr) {
+                    auto* p = static_cast<std::promise<ParsedMessage>*>(user_ptr);
+                    p->set_value(pm);
+                },
+                [](const ParsedMessage& pm, void* user_ptr) {
+                    auto* p = static_cast<std::promise<ParsedMessage>*>(user_ptr);
+                    p->set_value(pm);
+                },
+                &promise
+            );
+
+            // Try sending
+            if (!send_rpc(id, method, params_json)) {
+                LOG_WARN("Rate limited (attempt {}/{})", attempt, max_retries);
+                std::this_thread::sleep_for(backoff);
+                backoff *= 2;  // exponential backoff
+                continue;
+            }
+
+            // Wait for response
+            if (future.wait_for(timeout) == std::future_status::ready) {
+                return future.get();
+            }
+
+            LOG_WARN("RPC timeout (attempt {}/{})", attempt, max_retries);
+
+            // Optional: small sleep before retry
+            std::this_thread::sleep_for(backoff);
+            backoff *= 2;
         }
-        // Wait for the response with a timeout
-        if (future.wait_for(timeout) != std::future_status::ready) {
-            throw std::runtime_error("RPC timeout");
-        }
-        // Return the parsed message (either success or error)
-        return future.get();
+
+        throw std::runtime_error("RPC failed after max retries");
     }
+
 
     /**
      * @brief Send an RPC request and return a future for the response.
