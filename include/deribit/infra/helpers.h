@@ -4,8 +4,13 @@
 #include <cstdint>
 #include <fstream>
 #include <stdexcept>
+#include <filesystem>
+#include <iostream>
 
 #include "../models/ohlcv.h"
+#include "deribit/models/historical_ohlcv.h"
+
+namespace fs = std::filesystem;
 
 namespace deribit::helpers {
 	/**
@@ -121,6 +126,40 @@ namespace deribit::helpers {
 		std::vector<OHLCV> candles(count);
 		file.read(reinterpret_cast<char*>(candles.data()), count * sizeof(OHLCV));
 		return candles;
+	}
+
+	inline void save_trades_to_csv(const std::vector<deribit::detail::Trade>& trades, const std::string& filename) {
+		std::ofstream file(filename);
+		file << "timestamp,trade_seq,price,amount,direction\n";
+
+		for (const auto& t : trades) {
+			file << t.timestamp << ","
+				 << t.trade_seq << ","
+				 << t.price << ","
+				 << t.amount << ","
+				 << (t.direction == detail::TradeDirection::Buy ? "buy" : "sell")
+				 << "\n";
+		}
+	}
+
+	/** @brief Ensure that a directory exists, creating it if necessary.
+	 *
+	 * This helper attempts to create the specified directory and any
+	 * necessary parent directories. If the directory already exists, this
+	 * is a no-op. If creation fails for any reason (e.g. permissions,
+	 * invalid path), an exception is thrown.
+	 *
+	 * @param path The directory path to ensure exists.
+	 * @throws std::filesystem::filesystem_error if the directory cannot be created.
+	 */
+	inline void ensure_directory(const std::string& path) {
+		try {
+			fs::create_directories(path);
+		}
+		catch (const fs::filesystem_error& e) {
+			std::cerr << "Filesystem error: " << e.what() << "\n";
+			throw;
+		}
 	}
 }
 
