@@ -2,6 +2,7 @@
 #define HFTDERIBIT_DISPATCHER_H
 
 #include <simdjson.h>
+#include <functional>
 
 #include "../infra/fast_hash.h"
 #include "rpc_handler.h"
@@ -40,7 +41,10 @@ class Dispatcher {
      * the resulting index is used to look up the handler to call when a
      * notification for that channel is received.
      */
-    alignas(64) void (*sub_handler[SUB_TABLE])(const ParsedMessage&) = { nullptr };
+    // alignas(64) void (*sub_handler[SUB_TABLE])(const ParsedMessage&) = { nullptr };
+    // This improved version allows a more flexible sub handler
+    // I can now store a std::function which can be a lambda, function pointer, or any callable object
+    alignas(64) std::function<void(const ParsedMessage&)> sub_handler[SUB_TABLE];
 
     /**
      * simdjson ondemand parser instance used for parsing the incoming
@@ -71,20 +75,70 @@ public:
     }
 
     /**
-     * Register a subscription handler for a channel name.
+     * Templated helper to register RPC callbacks with type-safe functors.
      *
-     * The channel string is hashed into the fixed-size handler table. When
-     * a notification for the same channel is received, the stored handler
-     * will be invoked with a ParsedMessage describing the notification.
+     * This overload allows registering any callable object (e.g. lambda,
+     * std::function) as success and error handlers without needing to
+     * manually define static functions. The provided callables are stored
+     * in a wrapper struct that is allocated on the heap, and a pointer to
+     * this struct is passed as user_data to the RPC handler. The handler
+     * lambdas then cast the user_data back to the wrapper type to invoke
+     * the original callables.
      *
-     * @param channel The subscription channel name (string view).
-     * @param handler The callback invoked for notifications on this channel.
+     * Note: The caller is responsible for ensuring that the wrapper memory
+     * is properly managed and freed after the RPC response is handled.
+     *
+     * @param id The numeric id used to correlate responses with requests.
+     * @param on_success Callable invoked for successful responses.
+     * @param on_error Callable invoked for error responses.
+     * @param user_data Opaque pointer forwarded to the callbacks (not used in this overload).
      */
-    inline void register_subscription(std::string_view channel,
-                                      void (*handler)(const ParsedMessage&))
+    template<typename Success, typename Error>
+    inline void register_rpc(uint64_t id,
+                             Success&& on_success,
+                             Error&& on_error)
+    {
+        struct Wrapper {
+            Success success;
+            Error error;
+        };
+
+        auto wrapper = std::make_unique<Wrapper>(Wrapper{
+            std::forward<Success>(on_success),
+            std::forward<Error>(on_error)
+        });
+
+        register_rpc(
+            id,
+            [](const ParsedMessage& pm, void* data)
+            {
+                std::unique_ptr<Wrapper> w(static_cast<Wrapper*>(data));
+                w->success(pm);
+            },
+            [](const ParsedMessage& pm, void* data)
+            {
+                std::unique_ptr<Wrapper> w(static_cast<Wrapper*>(data));
+                w->error(pm);
+            },
+            wrapper.release()
+        );
+    }
+
+    /**
+     * Register a subscription handler for a given channel.
+     *
+     * The channel string is hashed to determine the index in the
+     * subscription handler table. The provided handler will be called
+     * when a notification for that channel is received.
+     *
+     * @param channel The subscription channel name (e.g. "ticker.BTC-PERPETUAL").
+     * @param handler Callable invoked when a notification for the channel is received.
+     */
+    template<typename Handler>
+    inline void register_subscription(std::string_view channel, Handler&& handler)
     {
         uint32_t idx = fast_hash(channel) & (SUB_TABLE - 1);
-        sub_handler[idx] = handler;
+        sub_handler[idx] = std::forward<Handler>(handler);
     }
 
     /**
