@@ -31,6 +31,7 @@ class DeribitClient : public AccessTokenProvider {
 
 private:
     /* Authentication fields for OAuth2 client credentials flow. */
+    bool const testnet = true; /**< Flag to determine whether to connect to testnet or mainnet */
     std::string client_id; /**< Client ID for authentication */
     std::string client_secret; /**< Client secret for authentication */
     std::string access_token; /**< Access token received after authentication */
@@ -72,8 +73,12 @@ public:
      * and websocket. The client is initially disconnected; call connect()
      * to establish the underlying network connection and start workers.
      */
-    DeribitClient() : receiver(ws, inbound_queue),
-                      sender(outbound_queue, ws, this) {
+    explicit DeribitClient(bool testnet = true)
+        : testnet(testnet),
+          ws(testnet),
+          receiver(ws, inbound_queue),
+          sender(outbound_queue, ws, this)
+    {
         LOG_DEBUG("Loading credentials from env...");
         load_credentials_from_env();
     }
@@ -92,8 +97,13 @@ public:
      * It throws if either variable is missing.
      */
     void load_credentials_from_env() {
-        client_id     = deribit::get_env("DERIBIT_CLIENT_ID");
-        client_secret = deribit::get_env("DERIBIT_CLIENT_SECRET");
+        if (testnet) {
+            client_id     = deribit::get_env("TESTNET_DERIBIT_CLIENT_ID");
+            client_secret = deribit::get_env("TESTNET_DERIBIT_CLIENT_SECRET");
+        } else {
+            client_id     = deribit::get_env("DERIBIT_CLIENT_ID");
+            client_secret = deribit::get_env("DERIBIT_CLIENT_SECRET");
+        }
     }
 
     /**

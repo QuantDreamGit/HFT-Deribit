@@ -22,7 +22,10 @@ namespace deribit {
      * These constants are used by the WebSocket helper to form the
      * TCP/TLS connection and perform the WebSocket handshake.
      */
-    static constexpr const char* DERIBIT_HOST = "test.deribit.com";
+    static constexpr const char* TESTNET_DERIBIT_HOST = "test.deribit.com";
+    static constexpr const char* TESTNET_DERIBIT_PORT = "443";
+    static constexpr const char* TESTNET_DERIBIT_PATH = "/ws/api/v2";
+    static constexpr const char* DERIBIT_HOST = "www.deribit.com";
     static constexpr const char* DERIBIT_PORT = "443";
     static constexpr const char* DERIBIT_PATH = "/ws/api/v2";
 
@@ -42,6 +45,9 @@ namespace deribit {
         websocket::stream<ssl::stream<net::ip::tcp::socket>> ws_;
         std::atomic<bool> shutting_down_{false};
 
+    private:
+        bool testnet_;
+
     public:
         /**
          * Construct the helper and configure basic TLS parameters.
@@ -50,10 +56,11 @@ namespace deribit {
          * verification paths are used. For testnet we disable certificate
          * verification to simplify development; adjust this for production.
          */
-        WebSocketBeast()
+        WebSocketBeast(bool const testnet)
             : ctx_(ssl::context::tlsv12_client),
               resolver_(net::make_strand(ioc_)),
-              ws_(net::make_strand(ioc_), ctx_)
+              ws_(net::make_strand(ioc_), ctx_),
+              testnet_(testnet)
         {
             ctx_.set_default_verify_paths();
             ctx_.set_verify_mode(ssl::verify_none); // OK for testnet
@@ -68,18 +75,23 @@ namespace deribit {
          * failures that occur while setting SNI or during the handshakes.
          */
         void connect() {
+            LOG_INFO("|=================== DERIBIT {} ===================|", testnet_ ? "Testnet" : "Mainnet");
             LOG_INFO("Starting Deribit WebSocket connection...");
 
-            LOG_DEBUG("Resolving {}:{}", DERIBIT_HOST, DERIBIT_PORT);
-            auto const results = resolver_.resolve(DERIBIT_HOST, DERIBIT_PORT);
+            const char* host = testnet_ ? TESTNET_DERIBIT_HOST : DERIBIT_HOST;
+            const char* port = testnet_ ? TESTNET_DERIBIT_PORT : DERIBIT_PORT;
+            const char* path = testnet_ ? TESTNET_DERIBIT_PATH : DERIBIT_PATH;
+
+            LOG_DEBUG("Resolving {}:{}", host, port);
+            auto const results = resolver_.resolve(host, port);
 
             LOG_DEBUG("TCP connecting...");
             auto ep = net::connect(ws_.next_layer().next_layer(), results);
 
-            std::string host_port = std::string(DERIBIT_HOST) + ":" + std::to_string(ep.port());
+            std::string host_port = std::string(host) + ":" + std::to_string(ep.port());
 
-            LOG_DEBUG("Setting SNI to {}", DERIBIT_HOST);
-            if (!SSL_set_tlsext_host_name(ws_.next_layer().native_handle(), DERIBIT_HOST)) {
+            LOG_DEBUG("Setting SNI to {}", host);
+            if (!SSL_set_tlsext_host_name(ws_.next_layer().native_handle(), host)) {
                 beast::error_code ec(static_cast<int>(::ERR_get_error()), net::error::get_ssl_category());
                 throw beast::system_error{ec, "Failed to set SNI"};
             }
@@ -89,9 +101,9 @@ namespace deribit {
 
             LOG_DEBUG("Performing WebSocket handshake...");
             ws_.set_option(websocket::stream_base::timeout::suggested(beast::role_type::client));
-            ws_.handshake(host_port, DERIBIT_PATH);
+            ws_.handshake(host_port, path);
 
-            LOG_INFO("Deribit WebSocket connected (Testnet).");
+            LOG_INFO("Deribit WebSocket connected ({}).", testnet_ ? "Testnet" : "Mainnet");
         }
 
         /**
