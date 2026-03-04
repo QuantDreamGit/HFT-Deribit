@@ -242,14 +242,34 @@ public:
 
         std::string msg = std::string(R"({
             "jsonrpc": "2.0",
-            "id": 1001,
+            "id": )")
+            + std::to_string(next_rpc_id()) +
+            R"(,
             "method": "public/subscribe",
-            "params": { "channels": [")")
+            "params": { "channels": [")"
             + channel +
             R"("] }
-        })";
+            })";
 
         outbound_queue.push(msg);
+    }
+
+    /**
+     * @brief Convenience helper to register a subscription handler and subscribe to a channel.
+     *
+     * This overload allows you to provide a callback handler for the subscription
+     * notifications at the same time as sending the subscribe request. The handler
+     * will be registered before the request is sent to ensure that notifications
+     * are not missed.
+     *
+     * @param channel The subscription channel to subscribe to.
+     * @param handler Callable invoked when notifications for the channel are received.
+     */
+    template<typename Handler>
+    void subscribe(const std::string& channel, Handler&& handler)
+    {
+        dispatcher.register_subscription(channel, std::forward<Handler>(handler));
+        subscribe(channel); // send RPC
     }
 
     /**
